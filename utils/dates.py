@@ -16,7 +16,9 @@ def to_date(value: str | date | datetime | pd.Timestamp) -> date:
 
 def today_date() -> date:
     return date.today()
-
+    
+def auto_end_date(lag_days: int = 1) -> date:
+    return date.today() - timedelta(days=lag_days)
 
 def date_to_iso_yearweek(value: str | date | datetime | pd.Timestamp) -> int:
     d = to_date(value)

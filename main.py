@@ -7,7 +7,7 @@ import pandas as pd
 
 from checks.local_profile import profile_all_raw_sources, profile_raw_source
 from checks.pg_profile import profile_all_pg_tables, profile_pg_table
-from config.settings import INITIAL_START_DATE, INCREMENTAL_LOOKBACK_DAYS
+from config.settings import INITIAL_START_DATE, INCREMENTAL_LOOKBACK_DAYS, END_DATE_LAG_DAYS
 from config.sources import ALL_SOURCES, DISEASE_SOURCES
 from config.tables import POSTGRES_TABLES
 from extractors.nhi import NHIExtractor
@@ -19,7 +19,7 @@ from transforms.disease_raw import normalize_disease_raw
 from transforms.model_dataset import build_model_dataset
 from transforms.weather_weekly import build_weather_weekly
 from utils.cli import parse_args
-from utils.dates import date_range_to_yearweek_range, resolve_incremental_start, today_date
+from utils.dates import auto_end_date, date_range_to_yearweek_range, resolve_incremental_start
 from utils.logger import build_run_id, setup_logger
 from utils.state import load_state, save_state, update_local_source_state, update_pg_table_state
 from extractors.dim_agegroup import load_dim_agegroup
@@ -99,23 +99,44 @@ def upload_model_source(source: str, start_date: str, end_date: str, logger) -> 
     return rows, profile
 
 
-def resolve_dates(mode: str, args, state: dict) -> tuple[str, str]:
-    end = args.end_date or str(today_date())
+def resolve_dates_for_source(mode: str, args, state: dict, source: str) -> tuple[str, str]:
+    """
+    依照 mode 與 source 自動決定執行日期區間。
+
+    initial:
+        start_date = INITIAL_START_DATE
+        end_date   = auto_end_date()
+
+    incremental:
+        start_date = 該 source 上次成功 end_date - lookback_days
+        end_date   = auto_end_date()
+    """
+    end = args.end_date or str(auto_end_date(END_DATE_LAG_DAYS))
+
     if args.start_date:
         return args.start_date, end
 
     if mode == "initial":
         return INITIAL_START_DATE, end
 
-    lookback_days = args.lookback_days if args.lookback_days is not None else INCREMENTAL_LOOKBACK_DAYS
-    local_sources = state.get("local_store", {})
-    last_dates = [
-        v.get("last_success_end_date")
-        for v in local_sources.values()
-        if isinstance(v, dict) and v.get("last_success_end_date")
-    ]
-    last_end = max(last_dates) if last_dates else None
-    start = resolve_incremental_start(last_end, lookback_days, INITIAL_START_DATE)
+    lookback_days = (
+        args.lookback_days
+        if args.lookback_days is not None
+        else INCREMENTAL_LOOKBACK_DAYS
+    )
+
+    source_state = state.get("local_store", {}).get(source, {})
+    last_end = (
+        source_state.get("last_success_end_date")
+        or source_state.get("max_date")
+    )
+
+    start = resolve_incremental_start(
+        last_success_end_date=last_end,
+        lookback_days=lookback_days,
+        default_start_date=INITIAL_START_DATE,
+    )
+
     return str(start), end
 
 
@@ -145,14 +166,25 @@ def main() -> None:
         save_state(state)
         return
 
-    start_date, end_date = resolve_dates(args.mode, args, state)
-    start_yw, end_yw = date_range_to_yearweek_range(start_date, end_date)
-    logger.info(f"resolved_range start_date={start_date} end_date={end_date} yearweek={start_yw}-{end_yw}")
-
     sources = selected_sources(args.source)
+
+    source_ranges = {
+        source: resolve_dates_for_source(args.mode, args, state, source)
+        for source in sources
+    }
+
+    for source, (start_date, end_date) in source_ranges.items():
+        start_yw, end_yw = date_range_to_yearweek_range(start_date, end_date)
+        logger.info(
+            f"resolved_range source={source} "
+            f"start_date={start_date} end_date={end_date} "
+            f"yearweek={start_yw}-{end_yw}"
+        )
 
     if not args.skip_extract:
         for source in sources:
+            start_date, end_date = source_ranges[source]
+
             try:
                 profile = refresh_local_cache(source, start_date, end_date, logger)
                 state = update_local_source_state(state, source, start_date, end_date, profile)
@@ -165,16 +197,20 @@ def main() -> None:
 
     if not args.skip_upload:
         try:
-            if args.source in {"all", "weather"}:
+            if "weather" in sources:
+                start_date, end_date = source_ranges["weather"]
+                start_yw, end_yw = date_range_to_yearweek_range(start_date, end_date)
+
                 rows, profile = upload_weather(start_date, end_date, logger)
                 if profile:
                     state = update_pg_table_state(state, "weather", start_yw, end_yw, profile)
 
             model_sources = [s for s in sources if s in DISEASE_SOURCES]
-            if args.source == "weather":
-                model_sources = []
 
             for source in model_sources:
+                start_date, end_date = source_ranges[source]
+                start_yw, end_yw = date_range_to_yearweek_range(start_date, end_date)
+
                 rows, profile = upload_model_source(source, start_date, end_date, logger)
                 if profile:
                     state = update_pg_table_state(state, source, start_yw, end_yw, profile)
