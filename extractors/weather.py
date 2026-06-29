@@ -3,7 +3,7 @@ from __future__ import annotations
 import pandas as pd
 from eic_utils import conn, utility
 
-from config.settings import POSTGRES_DBNAME
+from config.settings import WEATHER_DBNAME
 
 
 WEATHER_DAILY_CITY_COLUMNS = [
@@ -71,7 +71,7 @@ class WeatherExtractor:
         self.end_date = end_date
 
     @utility.timer()
-    @conn.deco.postgres(dbname=POSTGRES_DBNAME)
+    @conn.deco.postgres(dbname=WEATHER_DBNAME)
     def extract(self, cur=None) -> pd.DataFrame:
         """抽取每日縣市層級天氣資料。"""
         select_columns = []

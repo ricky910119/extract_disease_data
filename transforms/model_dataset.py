@@ -1,29 +1,34 @@
 from __future__ import annotations
 
-from datetime import datetime
-
 import pandas as pd
 
-from transforms.disease_age_pivot import pivot_age_counts
-from transforms.disease_weekly import build_disease_weekly
+from transforms.disease_model import (
+    build_disease_age_pivot_model,
+    merge_disease_model_with_weather,
+)
 
 
-def build_model_dataset(df_raw_disease: pd.DataFrame, df_weather_weekly: pd.DataFrame | None = None) -> pd.DataFrame:
+def build_model_dataset(
+    df_raw_disease: pd.DataFrame,
+    df_weather_weekly: pd.DataFrame | None = None,
+    df_dim_agegroup: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """
+    建立最終模型資料。
+
+    疾病資料會先依 yearweek + branch + county 彙總，
+    再將 disease x age_group 轉為欄位，
+    最後合併 weather_weekly_city。
+    """
     if df_raw_disease.empty:
         return pd.DataFrame()
 
-    disease_weekly = build_disease_weekly(df_raw_disease)
-    disease_pivot = pivot_age_counts(disease_weekly)
+    disease_model = build_disease_age_pivot_model(
+        df_raw=df_raw_disease,
+        df_dim_agegroup=df_dim_agegroup,
+    )
 
-    if df_weather_weekly is not None and not df_weather_weekly.empty:
-        weather = df_weather_weekly.copy()
-        merge_cols = ["yearweek", "county"]
-        drop_cols = [c for c in ["year", "week", "week_start_date", "week_end_date"] if c in weather.columns]
-        weather = weather.drop(columns=drop_cols, errors="ignore")
-        out = disease_pivot.merge(weather, on=merge_cols, how="left")
-    else:
-        out = disease_pivot
-
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    out["updated_at"] = now
-    return out.sort_values(["yearweek", "county", "disease"]).reset_index(drop=True)
+    return merge_disease_model_with_weather(
+        df_disease_model=disease_model,
+        df_weather_weekly=df_weather_weekly,
+    )

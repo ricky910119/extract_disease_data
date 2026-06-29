@@ -17,8 +17,8 @@ RAW_DATE_COLUMNS = {
 }
 
 RAW_KEYS = {
-    "nhi_er": ["date", "source", "branch", "county", "age_group", "disease"],
-    "nhi_opd": ["date", "source", "branch", "county", "age_group", "disease"],
-    "rods": ["date", "source", "branch", "county", "age_group", "disease"],
+    "nhi_er": ["date", "source", "branch", "county", "age_group"],
+    "nhi_opd": ["date", "source", "branch", "county", "age_group"],
+    "rods": ["date", "source", "branch", "county", "age_group"],
     "weather": ["date", "county"],
 }

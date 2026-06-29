@@ -22,7 +22,7 @@ from utils.cli import parse_args
 from utils.dates import date_range_to_yearweek_range, resolve_incremental_start, today_date
 from utils.logger import build_run_id, setup_logger
 from utils.state import load_state, save_state, update_local_source_state, update_pg_table_state
-
+from extractors.dim_agegroup import load_dim_agegroup
 
 def selected_sources(source_arg: str) -> list[str]:
     if source_arg == "all":
@@ -82,7 +82,13 @@ def upload_model_source(source: str, start_date: str, end_date: str, logger) -> 
         return 0, {}
 
     weather_weekly = build_weather_for_range(start_date, end_date)
-    model_df = build_model_dataset(raw_disease, weather_weekly)
+    dim_agegroup = load_dim_agegroup()
+
+    model_df = build_model_dataset(
+        df_raw_disease=raw_disease,
+        df_weather_weekly=weather_weekly,
+        df_dim_agegroup=dim_agegroup,
+    )
     if model_df.empty:
         logger.warning(f"model source={source} skipped: model dataset is empty")
         return 0, {}

@@ -134,6 +134,61 @@ def build_weather_weekly(df_raw: pd.DataFrame, date_col: str = "date", county_co
     )
     weekly = weekly.merge(observed_days, on=group_cols, how="left")
     weekly["weather_observed_days"] = weekly["weather_observed_days"].fillna(0).astype(int)
+
+    # weather_weekly_city 輸出前，將天氣連續數值欄位四捨五入到小數第 3 位
+    weather_round_cols = [
+        "lat_mean",
+        "lon_mean",
+        "station_pressure_mean",
+        "station_pressure_min",
+        "station_pressure_max",
+        "sea_level_pressure_mean",
+        "sea_level_pressure_min",
+        "sea_level_pressure_max",
+        "air_temperature_mean",
+        "air_temperature_min",
+        "air_temperature_max",
+        "air_temperature_daily_range_mean",
+        "dew_point_temperature_mean",
+        "dew_point_temperature_min",
+        "dew_point_temperature_max",
+        "relative_humidity_mean",
+        "relative_humidity_min",
+        "relative_humidity_max",
+        "wind_speed_mean",
+        "wind_speed_ten_minutely_max",
+        "wind_direction_prevailing_mode",
+        "wind_direction_ten_minutely_max_mode",
+        "peak_gust_max",
+        "peak_gust_direction_mode",
+        "precipitation_accumulation_mean",
+        "precipitation_accumulation_max",
+        "precipitation_hourly_maximum_mean",
+        "precipitation_hourly_maximum_max",
+        "precipitation_sixty_minutely_maximum_mean",
+        "precipitation_sixty_minutely_maximum_max",
+        "precipitation_ten_minutely_maximum_mean",
+        "precipitation_ten_minutely_maximum_max",
+        "precipitation_duration_total_mean",
+        "precipitation_duration_total_max",
+        "sunshine_duration_total_mean",
+        "sunshine_duration_rate_mean",
+        "global_solar_radiation_accumulation_mean",
+        "global_solar_radiation_hourly_maximum_max",
+        "visibility_mean",
+        "evaporation_class_a_pan_accumulation_mean",
+        "uv_index_maximum_mean",
+        "uv_index_maximum_max",
+        "total_cloud_amount_mean",
+    ]
+
+    weather_round_cols = [
+        c for c in weather_round_cols
+        if c in weekly.columns
+    ]
+
+    weekly[weather_round_cols] = weekly[weather_round_cols].round(3)
+
     weekly["weather_updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     return weekly.sort_values(["yearweek", "county"]).reset_index(drop=True)

@@ -48,3 +48,4 @@ MODEL_AGE_COLUMNS = [
     "count_age_65_plus",
     "count_age_unknown",
 ]
+WEATHER_DBNAME = "CWB_DATA"
