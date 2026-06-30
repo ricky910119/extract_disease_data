@@ -13,6 +13,7 @@ from config.tables import POSTGRES_TABLES
 from extractors.nhi import NHIExtractor
 from extractors.rods import RODSExtractor
 from extractors.weather import WeatherExtractor
+from extractors.model_source_total_weekly_county import run_model_source_total_weekly_county
 from local_store.raw_cache import load_raw, load_raw_range, save_raw_range
 from loaders.replace_strategy import upload_yearweek_range
 from transforms.disease_raw import normalize_disease_raw
@@ -73,6 +74,49 @@ def upload_weather(start_date: str, end_date: str, logger) -> tuple[int, dict]:
     profile = profile_pg_table("weather")
     return rows, profile
 
+def aggregate_rods_model_dataset_to_national(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    RODS 改為全台層級預測。
+
+    將 RODS 的縣市別疾病數加總成：
+        yearweek × disease × county='全國'
+
+    數值欄位：
+        count 加總
+
+    其他欄位：
+        year、week 保留
+        county 固定為 全國
+    """
+    if df.empty:
+        return df
+
+    df = df.copy()
+
+    required_cols = {"yearweek", "disease", "count"}
+    missing_cols = required_cols - set(df.columns)
+
+    if missing_cols:
+        raise ValueError(f"RODS model_df missing columns: {sorted(missing_cols)}")
+
+    group_cols = []
+
+    for col in ["yearweek", "year", "week", "disease"]:
+        if col in df.columns:
+            group_cols.append(col)
+
+    df_national = (
+        df
+        .groupby(group_cols, as_index=False)
+        .agg({"count": "sum"})
+    )
+
+    df_national["county"] = "全國"
+
+    ordered_cols = [c for c in df.columns if c in df_national.columns]
+    extra_cols = [c for c in df_national.columns if c not in ordered_cols]
+
+    return df_national[ordered_cols + extra_cols]
 
 def upload_model_source(source: str, start_date: str, end_date: str, logger) -> tuple[int, dict]:
     start_yw, end_yw = date_range_to_yearweek_range(start_date, end_date)
@@ -89,6 +133,9 @@ def upload_model_source(source: str, start_date: str, end_date: str, logger) -> 
         df_weather_weekly=weather_weekly,
         df_dim_agegroup=dim_agegroup,
     )
+    if source == "rods":
+        model_df = aggregate_rods_model_dataset_to_national(model_df)
+
     if model_df.empty:
         logger.warning(f"model source={source} skipped: model dataset is empty")
         return 0, {}
@@ -98,6 +145,58 @@ def upload_model_source(source: str, start_date: str, end_date: str, logger) -> 
     profile = profile_pg_table(source)
     return rows, profile
 
+def resolve_total_source_range(
+    source_ranges: dict[str, tuple[str, str]],
+    model_sources: Iterable[str],
+) -> tuple[str, str]:
+    """
+    依照本次有執行的疾病資料源，決定總就醫人次資料的查詢區間。
+
+    因為總就醫人次表會一次建立：
+        nhi_opd
+        nhi_er
+        rods
+
+    所以這裡取本次所有疾病資料源的最小 start_date 與最大 end_date。
+    """
+    ranges = [source_ranges[source] for source in model_sources]
+
+    start = min(date.fromisoformat(start_date) for start_date, _ in ranges)
+    end = max(date.fromisoformat(end_date) for _, end_date in ranges)
+
+    return str(start), str(end)
+
+
+def upload_model_source_total(start_date: str, end_date: str, logger) -> tuple[int, dict]:
+    """
+    建立並上傳每週、縣市、資料源總就醫人次。
+
+    目標表：
+        disease_forecast_data.model_source_total_weekly_county
+    """
+    start_yw, end_yw = date_range_to_yearweek_range(start_date, end_date)
+
+    df_total = run_model_source_total_weekly_county(
+        start_date=start_date,
+        end_date=end_date,
+    )
+
+    rows = len(df_total)
+
+    logger.info(
+        f"upload model_source_total_weekly_county "
+        f"rows={rows} yearweek={start_yw}-{end_yw}"
+    )
+
+    profile = {
+        "rows": rows,
+        "start_date": start_date,
+        "end_date": end_date,
+        "min_yearweek": start_yw,
+        "max_yearweek": end_yw,
+    }
+
+    return rows, profile
 
 def resolve_dates_for_source(mode: str, args, state: dict, source: str) -> tuple[str, str]:
     """
@@ -214,6 +313,32 @@ def main() -> None:
                 rows, profile = upload_model_source(source, start_date, end_date, logger)
                 if profile:
                     state = update_pg_table_state(state, source, start_yw, end_yw, profile)
+
+            if model_sources:
+                total_start_date, total_end_date = resolve_total_source_range(
+                    source_ranges=source_ranges,
+                    model_sources=model_sources,
+                )
+
+                total_start_yw, total_end_yw = date_range_to_yearweek_range(
+                    total_start_date,
+                    total_end_date,
+                )
+
+                rows, profile = upload_model_source_total(
+                    start_date=total_start_date,
+                    end_date=total_end_date,
+                    logger=logger,
+                )
+
+                if profile:
+                    state = update_pg_table_state(
+                        state,
+                        "model_source_total_weekly_county",
+                        total_start_yw,
+                        total_end_yw,
+                        profile,
+                    )
         except Exception:
             logger.exception("upload failed")
             save_state(state)
