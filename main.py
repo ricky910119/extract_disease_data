@@ -7,27 +7,43 @@ import pandas as pd
 
 from checks.local_profile import profile_all_raw_sources, profile_raw_source
 from checks.pg_profile import profile_all_pg_tables, profile_pg_table
-from config.settings import INITIAL_START_DATE, INCREMENTAL_LOOKBACK_DAYS, END_DATE_LAG_DAYS
+from config.settings import (
+    END_DATE_LAG_DAYS,
+    INCREMENTAL_LOOKBACK_DAYS,
+    INITIAL_START_DATE,
+)
 from config.sources import ALL_SOURCES, DISEASE_SOURCES
-from config.tables import POSTGRES_TABLES
+from extractors.dim_agegroup import load_dim_agegroup
+from extractors.model_source_total_weekly_county import (
+    run_model_source_total_weekly_county,
+)
 from extractors.nhi import NHIExtractor
 from extractors.rods import RODSExtractor
 from extractors.weather import WeatherExtractor
-from extractors.model_source_total_weekly_county import run_model_source_total_weekly_county
-from local_store.raw_cache import load_raw, load_raw_range, save_raw_range
 from loaders.replace_strategy import upload_yearweek_range
+from local_store.raw_cache import load_raw_range, save_raw_range
 from transforms.disease_raw import normalize_disease_raw
 from transforms.model_dataset import build_model_dataset
 from transforms.weather_weekly import build_weather_weekly
 from utils.cli import parse_args
-from utils.dates import auto_end_date, date_range_to_yearweek_range, resolve_incremental_start
+from utils.dates import (
+    auto_end_date,
+    date_range_to_yearweek_range,
+    resolve_incremental_start,
+)
 from utils.logger import build_run_id, setup_logger
-from utils.state import load_state, save_state, update_local_source_state, update_pg_table_state
-from extractors.dim_agegroup import load_dim_agegroup
+from utils.state import (
+    load_state,
+    save_state,
+    update_local_source_state,
+    update_pg_table_state,
+)
+
 
 def selected_sources(source_arg: str) -> list[str]:
     if source_arg == "all":
         return list(ALL_SOURCES)
+
     return [source_arg]
 
 
@@ -35,92 +51,75 @@ def extract_source(source: str, start_date: str, end_date: str) -> pd.DataFrame:
     if source == "nhi_er":
         df = NHIExtractor(start_date, end_date).extract_er()
         return normalize_disease_raw(df, "NHI_ER")
+
     if source == "nhi_opd":
         df = NHIExtractor(start_date, end_date).extract_opd()
         return normalize_disease_raw(df, "NHI_OPD")
+
     if source == "rods":
         df = RODSExtractor(start_date, end_date).extract()
         return normalize_disease_raw(df, "RODS")
+
     if source == "weather":
         return WeatherExtractor(start_date, end_date).extract()
+
     raise KeyError(f"Unsupported source: {source}")
 
 
-def refresh_local_cache(source: str, start_date: str, end_date: str, logger) -> dict:
+def refresh_local_cache(
+    source: str,
+    start_date: str,
+    end_date: str,
+    logger,
+) -> dict:
     logger.info(f"extract source={source} start_date={start_date} end_date={end_date}")
+
     df = extract_source(source, start_date, end_date)
+
     logger.info(f"extract source={source} rows={len(df)}")
+
     saved = save_raw_range(source, df, start_date, end_date)
+
     logger.info(f"local cache source={source} total_rows={len(saved)}")
+
     return profile_raw_source(source)
 
 
 def build_weather_for_range(start_date: str, end_date: str) -> pd.DataFrame:
     raw_weather = load_raw_range("weather", start_date, end_date)
+
     if raw_weather.empty:
         return pd.DataFrame()
+
     return build_weather_weekly(raw_weather)
 
 
 def upload_weather(start_date: str, end_date: str, logger) -> tuple[int, dict]:
     start_yw, end_yw = date_range_to_yearweek_range(start_date, end_date)
     weather_weekly = build_weather_for_range(start_date, end_date)
+
     if weather_weekly.empty:
         logger.warning("weather_weekly_city skipped: local raw weather is empty")
         return 0, {}
 
     rows = upload_yearweek_range("weather", weather_weekly, start_yw, end_yw)
+
     logger.info(f"upload weather_weekly_city rows={rows} yearweek={start_yw}-{end_yw}")
+
     profile = profile_pg_table("weather")
+
     return rows, profile
 
-def aggregate_rods_model_dataset_to_national(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    RODS 改為全台層級預測。
 
-    將 RODS 的縣市別疾病數加總成：
-        yearweek × disease × county='全國'
-
-    數值欄位：
-        count 加總
-
-    其他欄位：
-        year、week 保留
-        county 固定為 全國
-    """
-    if df.empty:
-        return df
-
-    df = df.copy()
-
-    required_cols = {"yearweek", "disease", "count"}
-    missing_cols = required_cols - set(df.columns)
-
-    if missing_cols:
-        raise ValueError(f"RODS model_df missing columns: {sorted(missing_cols)}")
-
-    group_cols = []
-
-    for col in ["yearweek", "year", "week", "disease"]:
-        if col in df.columns:
-            group_cols.append(col)
-
-    df_national = (
-        df
-        .groupby(group_cols, as_index=False)
-        .agg({"count": "sum"})
-    )
-
-    df_national["county"] = "全國"
-
-    ordered_cols = [c for c in df.columns if c in df_national.columns]
-    extra_cols = [c for c in df_national.columns if c not in ordered_cols]
-
-    return df_national[ordered_cols + extra_cols]
-
-def upload_model_source(source: str, start_date: str, end_date: str, logger) -> tuple[int, dict]:
+def upload_model_source(
+    source: str,
+    start_date: str,
+    end_date: str,
+    logger,
+) -> tuple[int, dict]:
     start_yw, end_yw = date_range_to_yearweek_range(start_date, end_date)
     raw_disease = load_raw_range(source, start_date, end_date)
+
     if raw_disease.empty:
         logger.warning(f"model source={source} skipped: local raw disease is empty")
         return 0, {}
@@ -133,31 +132,29 @@ def upload_model_source(source: str, start_date: str, end_date: str, logger) -> 
         df_weather_weekly=weather_weekly,
         df_dim_agegroup=dim_agegroup,
     )
-    if source == "rods":
-        model_df = aggregate_rods_model_dataset_to_national(model_df)
 
     if model_df.empty:
         logger.warning(f"model source={source} skipped: model dataset is empty")
         return 0, {}
 
+    if source == "rods":
+        logger.info(f"RODS model source uses county-level dataset rows={len(model_df)}")
+
     rows = upload_yearweek_range(source, model_df, start_yw, end_yw)
+
     logger.info(f"upload model source={source} rows={rows} yearweek={start_yw}-{end_yw}")
+
     profile = profile_pg_table(source)
+
     return rows, profile
+
 
 def resolve_total_source_range(
     source_ranges: dict[str, tuple[str, str]],
     model_sources: Iterable[str],
 ) -> tuple[str, str]:
     """
-    依照本次有執行的疾病資料源，決定總就醫人次資料的查詢區間。
-
-    因為總就醫人次表會一次建立：
-        nhi_opd
-        nhi_er
-        rods
-
-    所以這裡取本次所有疾病資料源的最小 start_date 與最大 end_date。
+    依照疾病資料源的執行日期範圍建立總就醫人次查詢區間。
     """
     ranges = [source_ranges[source] for source in model_sources]
 
@@ -167,12 +164,13 @@ def resolve_total_source_range(
     return str(start), str(end)
 
 
-def upload_model_source_total(start_date: str, end_date: str, logger) -> tuple[int, dict]:
+def upload_model_source_total(
+    start_date: str,
+    end_date: str,
+    logger,
+) -> tuple[int, dict]:
     """
     建立並上傳每週、縣市、資料源總就醫人次。
-
-    目標表：
-        disease_forecast_data.model_source_total_weekly_county
     """
     start_yw, end_yw = date_range_to_yearweek_range(start_date, end_date)
 
@@ -184,8 +182,8 @@ def upload_model_source_total(start_date: str, end_date: str, logger) -> tuple[i
     rows = len(df_total)
 
     logger.info(
-        f"upload model_source_total_weekly_county "
-        f"rows={rows} yearweek={start_yw}-{end_yw}"
+        f"upload model_source_total_weekly_county rows={rows} "
+        f"yearweek={start_yw}-{end_yw}"
     )
 
     profile = {
@@ -198,17 +196,15 @@ def upload_model_source_total(start_date: str, end_date: str, logger) -> tuple[i
 
     return rows, profile
 
-def resolve_dates_for_source(mode: str, args, state: dict, source: str) -> tuple[str, str]:
+
+def resolve_dates_for_source(
+    mode: str,
+    args,
+    state: dict,
+    source: str,
+) -> tuple[str, str]:
     """
-    依照 mode 與 source 自動決定執行日期區間。
-
-    initial:
-        start_date = INITIAL_START_DATE
-        end_date   = auto_end_date()
-
-    incremental:
-        start_date = 該 source 上次成功 end_date - lookback_days
-        end_date   = auto_end_date()
+    依照執行模式、CLI 參數與 source 狀態決定本次日期區間。
     """
     end = args.end_date or str(auto_end_date(END_DATE_LAG_DAYS))
 
@@ -241,11 +237,13 @@ def resolve_dates_for_source(mode: str, args, state: dict, source: str) -> tuple
 
 def run_check_only(logger) -> None:
     logger.info("check-only local raw profile")
+
     local_profiles = profile_all_raw_sources()
     for source, profile in local_profiles.items():
         logger.info(f"local_profile source={source} profile={profile}")
 
     logger.info("check-only postgres profile")
+
     pg_profiles = profile_all_pg_tables()
     for table_key, profile in pg_profiles.items():
         logger.info(f"pg_profile table_key={table_key} profile={profile}")
@@ -256,6 +254,7 @@ def main() -> None:
     run_id = build_run_id()
     logger = setup_logger(run_id)
     state = load_state()
+
     state["last_run_id"] = run_id
 
     logger.info(f"run_id={run_id} mode={args.mode} source={args.source}")
@@ -274,6 +273,7 @@ def main() -> None:
 
     for source, (start_date, end_date) in source_ranges.items():
         start_yw, end_yw = date_range_to_yearweek_range(start_date, end_date)
+
         logger.info(
             f"resolved_range source={source} "
             f"start_date={start_date} end_date={end_date} "
@@ -286,9 +286,17 @@ def main() -> None:
 
             try:
                 profile = refresh_local_cache(source, start_date, end_date, logger)
-                state = update_local_source_state(state, source, start_date, end_date, profile)
-            except NotImplementedError as e:
-                logger.warning(f"source={source} skipped: {e}")
+                state = update_local_source_state(
+                    state,
+                    source,
+                    start_date,
+                    end_date,
+                    profile,
+                )
+
+            except NotImplementedError as exc:
+                logger.warning(f"source={source} skipped: {exc}")
+
             except Exception:
                 logger.exception(f"source={source} failed during extract/cache")
                 save_state(state)
@@ -301,18 +309,32 @@ def main() -> None:
                 start_yw, end_yw = date_range_to_yearweek_range(start_date, end_date)
 
                 rows, profile = upload_weather(start_date, end_date, logger)
-                if profile:
-                    state = update_pg_table_state(state, "weather", start_yw, end_yw, profile)
 
-            model_sources = [s for s in sources if s in DISEASE_SOURCES]
+                if profile:
+                    state = update_pg_table_state(
+                        state,
+                        "weather",
+                        start_yw,
+                        end_yw,
+                        profile,
+                    )
+
+            model_sources = [source for source in sources if source in DISEASE_SOURCES]
 
             for source in model_sources:
                 start_date, end_date = source_ranges[source]
                 start_yw, end_yw = date_range_to_yearweek_range(start_date, end_date)
 
                 rows, profile = upload_model_source(source, start_date, end_date, logger)
+
                 if profile:
-                    state = update_pg_table_state(state, source, start_yw, end_yw, profile)
+                    state = update_pg_table_state(
+                        state,
+                        source,
+                        start_yw,
+                        end_yw,
+                        profile,
+                    )
 
             if model_sources:
                 total_start_date, total_end_date = resolve_total_source_range(
@@ -339,12 +361,14 @@ def main() -> None:
                         total_end_yw,
                         profile,
                     )
+
         except Exception:
             logger.exception("upload failed")
             save_state(state)
             raise
 
     save_state(state)
+
     logger.info("run finished")
 
 

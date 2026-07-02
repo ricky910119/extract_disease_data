@@ -92,12 +92,42 @@ class RODSExtractor:
             columns=[c[0].lower() for c in cur.description],
         )
 
+        output_cols = [
+            "date",
+            "source",
+            "branch",
+            "county",
+            "age_group",
+            "EV",
+            "ILI",
+            "DI",
+            "total",
+        ]
+
         if df.empty:
-            return df
+            return pd.DataFrame(columns=output_cols)
 
         df["source"] = RODS_SOURCE["source_name"]
         df["date"] = pd.to_datetime(df["date"]).dt.date
-        df["county"] = df["county"].fillna("未知")
-        df["branch"] = df["branch"].fillna("未知")
+        df["county"] = df["county"].fillna("未知").astype(str).str.strip()
+        df["branch"] = df["branch"].fillna("未知").astype(str).str.strip()
+        df["age_group"] = df["age_group"].fillna("未知").astype(str).str.strip()
 
-        return df
+        for col in ["ev", "ili", "di", "total"]:
+            df[col] = (
+                pd.to_numeric(df[col], errors="coerce")
+                .fillna(0)
+                .astype(int)
+            )
+
+        df = df.rename(
+            columns={
+                "ev": "EV",
+                "ili": "ILI",
+                "di": "DI",
+            }
+        )
+
+        df = df[output_cols].copy()
+
+        return df.reset_index(drop=True)
